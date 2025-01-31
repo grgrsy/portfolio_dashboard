@@ -75,8 +75,15 @@ class Price(DataProcessor):
         super().__init__(file_path)
         self.today = date.today()
         self.yesterday = self.today - timedelta(days=1)
+        self.tickers_names = self.get_tickers_names()
         self.raw_df = self.update_historical_price()
         self.raw_df = self.add_new_ticker_price()
+        self.raw_df = self.raw_df.set_index('Date')
+    
+    def get_tickers_names(self):
+        tickers = pd.read_excel('data/tickers_name.xlsx', index_col=0)
+        tickers = tickers.to_dict()['Ticker']
+        return tickers
     
     def update_historical_price(self):
         tickers = list(self.raw_df.columns[1:])
@@ -111,3 +118,38 @@ class Price(DataProcessor):
             self.raw_df = pd.concat([self.raw_df, new_tickers_price], axis=1)
             self.write_file(self.raw_df)
         return self.raw_df
+
+
+class CompareWallet(Wallet):
+    def __init__(self, wallet:Wallet, price:Price, ticker_name:str):
+        self.ticker_code = self.get_ticker_code(ticker_name, price)
+        self.dca = self.get_dca_wallet(wallet, price)
+        self.dca_ts = self.get_dca_timeseries(wallet, price)
+    
+    def get_ticker_code(self, ticker_name:str, price:Price):
+        assert ticker_name in price.tickers_names.keys()
+        return price.tickers_names[ticker_name]
+
+    def get_dca_wallet(self, wallet:Wallet, price:Price) -> pd.DataFrame:
+        assert self.ticker_code in price.raw_df.columns
+        dca = wallet.deposit.join(price.raw_df[self.ticker_code])#.rename(columns={ticker_code : ticker_code})
+
+        buy_and_leftover = []
+        for i, row in dca.iterrows():
+            cash = row['Deposit']
+            if buy_and_leftover:
+                cash += buy_and_leftover[-1][1]
+            buy_and_leftover.append((
+                cash // row[self.ticker_code],
+                cash % row[self.ticker_code]
+            ))
+        dca[['ticker_buy', 'leftover']] = buy_and_leftover
+        dca['ticker_owned'] = dca['ticker_buy'].cumsum()
+        return dca
+
+    def get_dca_timeseries(self, wallet:Wallet, price:Price) -> pd.DataFrame:
+        ts = self.dca.drop(columns=self.ticker_code)
+        ts = ts.join(price.raw_df[self.ticker_code], how='right')
+        ts[['Deposit', 'ticker_buy']] = ts[['Deposit', 'ticker_buy']].fillna(0)
+        ts = ts.ffill()
+        return ts
